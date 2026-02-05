@@ -1,0 +1,5 @@
+{
+  "name": "NEXUS AI Builder Oficial",
+  "description": "An intelligent, Elementor-style visual editor that parses HTML, extracts design systems via Gemini, and allows real-time visual and AI-assisted modifications.",
+  "requestFramePermissions": []
+}
