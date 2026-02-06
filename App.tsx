@@ -1,8 +1,10 @@
 
-import React, { useState, useCallback, Suspense } from 'react';
+import React, { useState, useCallback, Suspense, useEffect, useRef } from 'react';
 import { usePersistence } from './hooks/usePersistence.ts';
 import { DashboardView } from './views/DashboardView.tsx';
 import { EditorView } from './views/EditorView.tsx';
+import { AssetsView } from './views/AssetsView.tsx';
+import { SettingsView } from './views/SettingsView.tsx';
 import { analyzeDesignSystem } from './services/geminiService.ts';
 import { Project, ViewMode } from './types.ts';
 
@@ -30,11 +32,12 @@ const tokenizeHtmlColors = (html: string): { processedHtml: string; variables: R
 };
 
 export default function App() {
-  const { projects, isLoading, saveProject, deleteProject } = usePersistence();
+  const { projects, isLoading, syncStatus, saveProject, deleteProject } = usePersistence();
   const [activeTab, setActiveTab] = useState<SidebarTab>('HOME');
   const [activeProject, setActiveProject] = useState<Project | null>(null);
+  const [lastSaved, setLastSaved] = useState<string>('');
+  const autoSaveTimerRef = useRef<number | null>(null);
 
-  // Editor-specific State
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.DESKTOP);
   const [zoom, setZoom] = useState(1);
   const [selectedElement, setSelectedElement] = useState<HTMLElement | null>(null);
@@ -42,12 +45,41 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [updateTrigger, setUpdateTrigger] = useState(0);
 
+  // --- CAPTURA DE DOM REAL ---
+  const captureCurrentHtml = useCallback(() => {
+    const canvasFrame = document.querySelector('iframe') as HTMLIFrameElement;
+    if (canvasFrame && canvasFrame.contentDocument) {
+      const docClone = canvasFrame.contentDocument.documentElement.cloneNode(true) as HTMLElement;
+      docClone.querySelectorAll('.nexus-selected-outline, .nexus-hover-outline, .nexus-editing').forEach(el => {
+        el.classList.remove('nexus-selected-outline', 'nexus-hover-outline', 'nexus-editing');
+      });
+      return "<!DOCTYPE html>\n" + docClone.outerHTML;
+    }
+    return activeProject?.html || '';
+  }, [activeProject]);
+
+  // --- AUTO-SAVE LOGIC ---
+  useEffect(() => {
+    if (activeProject && activeTab === 'EDITOR') {
+      if (autoSaveTimerRef.current) window.clearTimeout(autoSaveTimerRef.current);
+      
+      autoSaveTimerRef.current = window.setTimeout(async () => {
+        const currentHtml = captureCurrentHtml();
+        const updated = { ...activeProject, html: currentHtml, lastUpdated: new Date().toISOString() };
+        await saveProject(updated);
+        setLastSaved(new Date().toLocaleTimeString());
+      }, 5000); // 5 segundos de inatividade para auto-save silencioso
+    }
+    return () => {
+      if (autoSaveTimerRef.current) window.clearTimeout(autoSaveTimerRef.current);
+    };
+  }, [activeProject, activeTab, captureCurrentHtml, saveProject]);
+
   const handleCreateNew = async (inputHtml: string) => {
     const { processedHtml, variables } = tokenizeHtmlColors(inputHtml);
-    
     const newProject: Project = {
       id: Math.random().toString(36).substr(2, 9),
-      name: `Site ${projects.length + 1}`,
+      name: `New Project ${projects.length + 1}`,
       subdomain: `site-${Math.random().toString(36).substr(2, 4)}`,
       html: processedHtml,
       designSystem: { colors: [], fonts: [], sections: [], variables },
@@ -66,33 +98,29 @@ export default function App() {
       setActiveProject(updatedProject);
       await saveProject(updatedProject);
     } catch (e) {
-      console.error("AI Analysis failed, project created anyway.");
+      console.error("AI Analysis failed.");
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  const saveActiveProject = async () => {
+  const handleManualSave = async () => {
     if (!activeProject) return;
-    const updated = { ...activeProject, lastUpdated: new Date().toISOString() };
+    const currentHtml = captureCurrentHtml();
+    const updated = { ...activeProject, html: currentHtml, lastUpdated: new Date().toISOString() };
+    setActiveProject(updated);
     const res = await saveProject(updated);
-    if (res.success) alert("Projeto salvo com sucesso!");
+    if (res.success) {
+      setLastSaved(new Date().toLocaleTimeString());
+      alert("Project saved successfully!");
+    }
   };
 
   const handleForceUpdate = useCallback(() => {
     setUpdateTrigger(prev => prev + 1);
-    if (activeProject) {
-        const canvasFrame = document.querySelector('iframe') as HTMLIFrameElement;
-        if (canvasFrame && canvasFrame.contentDocument) {
-            const docClone = canvasFrame.contentDocument.documentElement.cloneNode(true) as HTMLElement;
-            docClone.querySelectorAll('.nexus-selected-outline, .nexus-hover-outline, .nexus-editing').forEach(el => {
-                el.classList.remove('nexus-selected-outline', 'nexus-hover-outline', 'nexus-editing');
-            });
-            const cleanHtml = "<!DOCTYPE html>\n" + docClone.outerHTML;
-            setActiveProject(prev => prev ? { ...prev, html: cleanHtml } : null);
-        }
-    }
-  }, [activeProject]);
+    const cleanHtml = captureCurrentHtml();
+    setActiveProject(prev => prev ? { ...prev, html: cleanHtml } : null);
+  }, [captureCurrentHtml]);
 
   const handleVariableUpdate = (varName: string, newVal: string) => {
     if (!activeProject) return;
@@ -105,46 +133,54 @@ export default function App() {
 
   const SidebarItem = ({ tab, icon, label }: { tab: SidebarTab, icon: string, label: string }) => {
     const isActive = activeTab === tab;
-    const isDisabled = tab === 'EDITOR' && !activeProject;
+    const isDisabled = (tab === 'EDITOR' || tab === 'ASSETS' || tab === 'SETTINGS') && !activeProject;
     return (
       <button
         onClick={() => !isDisabled && setActiveTab(tab)}
         className={`group relative w-full aspect-square flex flex-col items-center justify-center transition-all duration-300 ${
-          isActive ? 'text-white' : isDisabled ? 'text-zinc-700 cursor-not-allowed' : 'text-zinc-500 hover:text-white'
+          isActive ? 'text-white' : isDisabled ? 'text-zinc-800 cursor-not-allowed opacity-30' : 'text-zinc-500 hover:text-white'
         }`}
-        title={label}
       >
-        {isActive && <div className="absolute left-0 w-1.5 h-1/2 bg-indigo-500 rounded-r-full shadow-[0_0_20px_rgba(99,102,241,0.6)]"></div>}
-        <div className={`p-3 rounded-2xl transition-all ${isActive ? 'bg-indigo-600 shadow-lg shadow-indigo-600/30' : 'group-hover:bg-white/5'}`}>
-          <i className={`fa-solid ${icon} text-lg`}></i>
-        </div>
-        <span className="text-[9px] font-bold mt-1.5 uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity translate-y-2 group-hover:translate-y-0 duration-300">{label}</span>
+        {isActive && (
+          <div className="absolute left-0 w-1 bg-indigo-500 h-1/2 rounded-r-full shadow-[0_0_15px_#6366f1]"></div>
+        )}
+        <i className={`fa-solid ${icon} text-lg mb-1.5 transition-transform group-hover:scale-110`}></i>
+        <span className="text-[8px] font-bold uppercase tracking-[0.2em]">{label}</span>
       </button>
     );
   };
 
   return (
-    <div className="h-screen w-screen flex bg-[#050505] overflow-hidden">
-      <aside className="w-24 h-full glass-panel border-r border-white/5 flex flex-col items-center py-8 z-[60] shrink-0">
-        <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white mb-12 shadow-2xl shadow-indigo-600/40 animate-pulse cursor-pointer" onClick={() => setActiveTab('HOME')}>
-          <i className="fa-solid fa-cube text-2xl"></i>
+    <div className="h-screen w-screen flex bg-[#050505] overflow-hidden text-zinc-300">
+      <aside className="w-24 h-full glass-panel border-r border-white/5 flex flex-col items-center py-8 z-[60] shrink-0 shadow-2xl">
+        <div className="w-14 h-14 bg-gradient-to-br from-indigo-600 to-purple-700 rounded-2xl flex items-center justify-center text-white mb-12 shadow-[0_0_30px_rgba(99,102,241,0.3)] cursor-pointer hover:scale-105 transition-transform" onClick={() => setActiveTab('HOME')}>
+          <i className="fa-solid fa-cube text-3xl"></i>
         </div>
-        <div className="flex-1 w-full space-y-4">
+        <div className="flex-1 w-full space-y-2">
           <SidebarItem tab="HOME" icon="fa-house" label="Home" />
           <SidebarItem tab="EDITOR" icon="fa-layer-group" label="Editor" />
-          <SidebarItem tab="ASSETS" icon="fa-folder-open" label="Assets" />
-        </div>
-        <div className="w-full mt-auto">
+          <SidebarItem tab="ASSETS" icon="fa-photo-film" label="Assets" />
           <SidebarItem tab="SETTINGS" icon="fa-gear" label="Config" />
+        </div>
+        <div className="mt-auto">
+           <div className="w-10 h-10 rounded-full bg-zinc-900 border border-white/10 flex items-center justify-center text-zinc-600 text-xs font-bold">
+              AI
+           </div>
         </div>
       </aside>
 
       <main className="flex-1 h-full relative overflow-hidden flex flex-col">
-        <Suspense fallback={<div className="flex-1 flex items-center justify-center text-white">Carregando interface...</div>}>
+        <Suspense fallback={<div className="flex-1 flex items-center justify-center">
+          <div className="flex flex-col items-center gap-4">
+            <i className="fa-solid fa-circle-notch fa-spin text-4xl text-indigo-500"></i>
+            <span className="text-xs font-bold uppercase tracking-widest text-zinc-500">Nexus OS Loading</span>
+          </div>
+        </div>}>
           {activeTab === 'HOME' && (
             <DashboardView 
               projects={projects} 
               isLoading={isLoading} 
+              syncStatus={syncStatus}
               onOpenProject={(p) => { setActiveProject(p); setActiveTab('EDITOR'); }} 
               onCreateNew={handleCreateNew} 
               onDeleteProject={(id, e) => { e.stopPropagation(); deleteProject(id); }}
@@ -162,16 +198,26 @@ export default function App() {
               handleSelect={(el) => { setSelectedElement(el); setSelectedId(el.id); }}
               updateTrigger={updateTrigger}
               isAnalyzing={isAnalyzing}
-              onSave={saveActiveProject}
+              onSave={handleManualSave}
               onForceUpdate={handleForceUpdate}
               onVariableUpdate={handleVariableUpdate}
               onUpdateProject={setActiveProject}
+              lastSaved={lastSaved}
             />
           )}
-          {(activeTab === 'ASSETS' || activeTab === 'SETTINGS') && (
-            <div className="flex-1 flex items-center justify-center text-zinc-500 font-bold uppercase tracking-widest bg-grid-tech">
-              Em desenvolvimento profissional...
-            </div>
+          {activeTab === 'ASSETS' && activeProject && (
+            <AssetsView activeProject={activeProject} />
+          )}
+          {activeTab === 'SETTINGS' && activeProject && (
+            <SettingsView 
+              activeProject={activeProject} 
+              onUpdateProject={setActiveProject}
+              onDeleteProject={async (id) => {
+                await deleteProject(id);
+                setActiveProject(null);
+                setActiveTab('HOME');
+              }}
+            />
           )}
         </Suspense>
       </main>
